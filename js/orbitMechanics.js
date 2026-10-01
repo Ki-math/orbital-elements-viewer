@@ -9,6 +9,7 @@
  *   OrbitMechanics.trueToMeanAnomaly(nu, e)   真近点角 → 平均近点角
  *   OrbitMechanics.meanToTrueAnomaly(M, e)    平均近点角 → 真近点角（ケプラー方程式を解く）
  *   OrbitMechanics.orbitSummary(el)           高度・周期・速度・状態ベクトルなどの諸元
+ *   OrbitMechanics.j2SecularRates(a, e, inc)  J2 による Ω・ω の永年変化率
  *
  * 単位：距離 km、時間 s、角度 rad。
  * 軌道要素 el = {a, e, inc, raan, argp, nu}
@@ -18,6 +19,8 @@
 
   const MU = 398600.4418;   // km^3/s^2
   const RE = 6378.137;      // km
+  const J2 = 1.08262668e-3; // 地球の扁平を表す帯球係数
+  const SIDEREAL_YEAR_DAYS = 365.2564;  // 太陽同期の判定に使う（地球の公転周期）
 
   /**
    * 軌道面まわりの単位ベクトルを ECI 座標で返す。
@@ -93,5 +96,24 @@
     };
   }
 
-  global.OrbitMechanics = {MU, RE, perifocalBasis, trueToMeanAnomaly, meanToTrueAnomaly, orbitSummary};
+  /**
+   * J2（地球の扁平）による永年変化率。1周期平均した値で、短周期の揺れは含まない。
+   *   raanDot  dΩ/dt = -3/2 · n · J2 · (RE/p)^2 · cos i            [rad/s]
+   *   argpDot  dω/dt =  3/4 · n · J2 · (RE/p)^2 · (5 cos^2 i - 1)  [rad/s]
+   * 順行軌道（i < 90°）では Ω は減少（西向きに後退）、逆行軌道では増加する。
+   * ω は臨界傾斜角 i ≈ 63.4° / 116.6° で止まる。
+   */
+  function j2SecularRates(a, e, inc) {
+    const n = Math.sqrt(MU / a ** 3);
+    const p = a * (1 - e * e);
+    const k = n * J2 * (RE / p) ** 2;
+    const c = Math.cos(inc);
+    return {
+      raanDot: -1.5 * k * c,
+      argpDot: 0.75 * k * (5 * c * c - 1),
+    };
+  }
+
+  global.OrbitMechanics = {MU, RE, J2, SIDEREAL_YEAR_DAYS, perifocalBasis, trueToMeanAnomaly, meanToTrueAnomaly,
+                           orbitSummary, j2SecularRates};
 })(window);

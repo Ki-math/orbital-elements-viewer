@@ -6,7 +6,7 @@
 :root {
   --bg: #0A0F1C; --panel: #0F1727; --panel2: #16213A; --line: #24324D;
   --text: #E7ECF4; --text2: #C9D2E1; --muted: #8C99B0; --faint: #5A6883;
-  --c-a: #F2B84B; --c-e: #F0795A; --c-i: #3CC7B3; --c-O: #A38BF6; --c-w: #5AA9F2; --c-n: #B9DB67;
+  --c-a: #F2B84B; --c-e: #F0795A; --c-i: #3CC7B3; --c-O: #A38BF6; --c-w: #5AA9F2; --c-n: #B9DB67; --c-j2: #E58BD0;
   --warn: #F2B84B; --bad: #FF6B6B;
   --sans: "IBM Plex Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -153,6 +153,32 @@ input[type=range]:focus-visible { outline: 2px solid var(--c); outline-offset: 2
 .fig { margin: 6px 0 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
 .fig svg { display: block; width: 100%; min-width: 300px; height: auto; }
 
+/* 言語切り替え */
+.title-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.seg.lang { background: var(--bg); backdrop-filter: none; }
+.seg.lang button { padding: 4px 9px; font-size: 11.5px; }
+
+/* J2 摂動 */
+.j2 { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--c-j2) 4%, var(--panel)); }
+.j2.on { border-color: color-mix(in srgb, var(--c-j2) 45%, var(--line)); }
+.switch { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; align-items: center; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { width: 38px; height: 22px; border-radius: 11px; background: var(--line); position: relative; transition: background .2s; }
+.switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--text); transition: transform .2s; }
+.switch input:checked + .track { background: var(--c-j2); }
+.switch input:checked + .track::after { transform: translateX(16px); background: var(--bg); }
+.switch input:focus-visible + .track { outline: 2px solid var(--c-j2); outline-offset: 2px; }
+.switch-text b { display: block; font-size: 13.5px; }
+.switch-text small { display: block; color: var(--muted); font-size: 12px; }
+.j2-hint, .j2-note { margin: 0; font-size: 12.5px; color: var(--text2); text-wrap: pretty; }
+.j2-note.muted { color: var(--muted); font-size: 12px; }
+.j2-note:empty { display: none; }
+.j2-body { display: grid; gap: 8px; }
+.ro > .wide { grid-column: 1 / -1; }
+.ghost-btn { justify-self: start; background: none; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 5px 11px; font-size: 12.5px; cursor: pointer; }
+.ghost-btn:hover { border-color: var(--faint); }
+.ghost-btn:focus-visible { outline: 2px solid var(--c-j2); outline-offset: 1px; }
+
 footer { color: var(--faint); font-size: 11.5px; font-family: var(--mono); line-height: 1.6; }
 footer a { color: var(--muted); }
 
@@ -165,4 +191,4 @@ footer a { color: var(--muted); }
   .explain { position: static; width: auto; margin: 12px 16px 0; }
   .panel { border-left: 0; overflow: visible; }
 }
-@media (prefers-reduced-motion: reduce) { .lbl, .el, .gl .t { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .lbl, .el, .gl .t, .switch .track, .switch .track::after { transition: none; } }

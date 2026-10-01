@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>軌道6要素ビューア</title>
-  <meta name="description" content="軌道6要素（a, e, i, Ω, ω, ν）をスライダーで動かし、3Dで関係する線と角度を色分けして確認できる学習用ビューア">
+  <meta name="description" content="軌道6要素（a, e, i, Ω, ω, ν）とJ2摂動による交点の後退を3Dで確認できる学習用ビューア / Interactive 3D viewer for the six Keplerian orbital elements and J2 nodal regression">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='5' fill='%233F6FB8'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='7' fill='none' stroke='%23B9DB67' stroke-width='2' transform='rotate(-30 16 16)'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,22 +17,24 @@
   <!-- ===== 3D 表示 ===== -->
   <main class="view">
     <div class="stage" id="stage">
-      <canvas id="cv" aria-label="軌道の3D表示。ドラッグで回転、ホイールでズーム"></canvas>
+      <canvas id="cv" data-i18n-aria="canvasAria"></canvas>
       <div class="labels" id="labels"></div>
       <div class="bar">
         <div class="play">
           <button class="pbtn" id="play" type="button"></button>
-          <div class="seg" id="speed" role="group" aria-label="再生速度">
-            <button type="button" data-v="lap" class="on">1周8秒</button>
+          <div class="seg" id="speed" role="group" data-i18n-aria="speedAria">
+            <button type="button" data-v="lap" class="on" data-i18n="speedLap"></button>
             <button type="button" data-v="100">×100</button>
             <button type="button" data-v="1000">×1000</button>
+            <button type="button" data-v="86400" data-j2-only hidden data-i18n="speedDay"></button>
+            <button type="button" data-v="864000" data-j2-only hidden data-i18n="speedDay10"></button>
           </div>
         </div>
-        <div class="seg" id="views" role="group" aria-label="視点">
-          <button type="button" data-v="oblique" class="on">斜めから</button>
-          <button type="button" data-v="north">北極の上から</button>
-          <button type="button" data-v="node">昇交点方向から</button>
-          <button type="button" data-v="plane">軌道面の真上から</button>
+        <div class="seg" id="views" role="group" data-i18n-aria="viewsAria">
+          <button type="button" data-v="oblique" class="on" data-i18n="viewOblique"></button>
+          <button type="button" data-v="north" data-i18n="viewNorth"></button>
+          <button type="button" data-v="node" data-i18n="viewNode"></button>
+          <button type="button" data-v="plane" data-i18n="viewPlane"></button>
         </div>
       </div>
     </div>
@@ -42,98 +44,65 @@
   <!-- ===== 操作パネル ===== -->
   <aside class="panel">
     <header>
-      <h1>軌道6要素ビューア</h1>
-      <p>スライダーを動かすと、その要素に関係する線と角度だけが強調されます。行の名前をクリックすると強調を固定できます（Esc で解除）。</p>
+      <div class="title-row">
+        <h1 data-i18n="title"></h1>
+        <div class="seg lang" id="lang" role="group" data-i18n-aria="langLabel">
+          <button type="button" data-v="ja" lang="ja">日本語</button>
+          <button type="button" data-v="en" lang="en">EN</button>
+        </div>
+      </div>
+      <p data-i18n="lead"></p>
     </header>
 
     <section>
-      <h2 class="sec-t">代表的な軌道</h2>
+      <h2 class="sec-t" data-i18n="presets"></h2>
       <div class="chips" id="presets"></div>
     </section>
 
     <section class="elements" id="elements"></section>
 
+    <section class="j2" id="j2">
+      <label class="switch">
+        <input type="checkbox" id="j2-on">
+        <span class="track" aria-hidden="true"></span>
+        <span class="switch-text"><b data-i18n="j2Title"></b><small data-i18n="j2Toggle"></small></span>
+      </label>
+      <p class="j2-hint" id="j2-hint" data-i18n="j2Hint"></p>
+      <div class="j2-body" id="j2-body" hidden>
+        <div class="ro">
+          <div><small data-i18n="j2RaanDot"></small><span id="j2-raan"></span></div>
+          <div><small data-i18n="j2ArgpDot"></small><span id="j2-argp"></span></div>
+          <div><small data-i18n="j2Cycle"></small><span id="j2-cycle"></span></div>
+          <div><small data-i18n="j2Elapsed"></small><span id="j2-elapsed"></span></div>
+          <div class="wide"><small data-i18n="j2DeltaO"></small><span id="j2-dO"></span></div>
+        </div>
+        <p class="j2-note" id="j2-note"></p>
+        <p class="j2-note muted" id="j2-frozen" data-i18n="j2Frozen" hidden></p>
+        <button type="button" class="ghost-btn" id="j2-reset" data-i18n="j2Reset"></button>
+      </div>
+    </section>
+
     <section>
-      <h2 class="sec-t">この軌道の諸元</h2>
+      <h2 class="sec-t" data-i18n="readouts"></h2>
       <div class="ro">
-        <div><small>近地点高度</small><span id="r-hp"></span></div>
-        <div><small>遠地点高度</small><span id="r-ha"></span></div>
-        <div><small>周期</small><span id="r-T"></span></div>
-        <div><small>いまの高度</small><span id="r-alt"></span></div>
-        <div><small>いまの速度</small><span id="r-v"></span></div>
-        <div><small>飛行経路角 γ</small><span id="r-g"></span></div>
+        <div><small data-i18n="rPerigee"></small><span id="r-hp"></span></div>
+        <div><small data-i18n="rApogee"></small><span id="r-ha"></span></div>
+        <div><small data-i18n="rPeriod"></small><span id="r-T"></span></div>
+        <div><small data-i18n="rAlt"></small><span id="r-alt"></span></div>
+        <div><small data-i18n="rSpeed"></small><span id="r-v"></span></div>
+        <div><small data-i18n="rGamma"></small><span id="r-g"></span></div>
       </div>
       <div class="sv" id="r-sv"></div>
       <div id="r-alert"></div>
     </section>
 
     <section>
-      <h2 class="sec-t">用語集　カーソルを合わせると図の該当部分が光ります</h2>
-      <dl class="gl" id="glossary">
-        <div class="t" tabindex="0" data-k="O" style="--c:#AEB9CC">
-          <dt><span class="dot"></span>春分点 ♈<span class="en">vernal equinox</span></dt>
-          <dd>宇宙空間での<b>方角の基準（0°）</b>です。春分の日に地球から見た太陽の方向で、恒星に対してほぼ動きません。地球が自転しても公転しても向きが変わらないので、地図の「北」のように使えます。図の ♈ 矢印（X軸）がこれです。
-            <div class="fig"><svg viewBox="0 0 320 132" role="img" aria-label="春分の日に地球から太陽を見た方向が春分点方向。3か月後の地球から見ても同じ向きを指す">
-              <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#AEB9CC"/></marker></defs>
-              <g font-family="IBM Plex Sans JP,sans-serif" font-size="10">
-                <ellipse cx="160" cy="62" rx="120" ry="40" fill="none" stroke="#34466A" stroke-width="1.2"/>
-                <text x="236" y="18" fill="#5A6883">地球の公転軌道</text>
-                <circle cx="160" cy="62" r="10" fill="#F2B84B"/>
-                <text x="160" y="82" fill="#F2B84B" text-anchor="middle">太陽</text>
-                <circle cx="40" cy="62" r="6" fill="#3F6FB8"/>
-                <line x1="48" y1="62" x2="146" y2="62" stroke="#AEB9CC" stroke-width="1.5" marker-end="url(#ah)"/>
-                <text x="97" y="55" fill="#E7ECF4" font-size="11" text-anchor="middle">♈ 春分点方向</text>
-                <text x="40" y="84" fill="#8C99B0" text-anchor="middle">春分の日</text>
-                <circle cx="160" cy="102" r="6" fill="#3F6FB8"/>
-                <line x1="168" y1="102" x2="236" y2="102" stroke="#AEB9CC" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah)"/>
-                <text x="160" y="124" fill="#8C99B0" text-anchor="middle">3か月後</text>
-                <text x="242" y="106" fill="#8C99B0">向きは同じ</text>
-              </g>
-            </svg></div>
-          </dd>
-        </div>
-        <div class="t" tabindex="0" data-k="O" style="--c:var(--c-O)">
-          <dt><span class="dot"></span>赤経<span class="en">right ascension</span></dt>
-          <dd>宇宙空間での<b>東西方向の角度</b>。春分点を 0° として、赤道面上を東回り（北極から見て反時計回り）に測ります。地球の経度に似ていますが、地球と一緒には回りません。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="O" style="--c:var(--c-O)">
-          <dt><span class="dot"></span>昇交点 ☊ ／ 降交点 ☋<span class="en">ascending / descending node</span></dt>
-          <dd>軌道が赤道面を横切る2点。衛星が<b>南から北へ</b>抜ける点が昇交点、北から南へ抜ける点が降交点です。2点を結ぶ直線を<b>交点線</b>と呼び、赤道面と軌道面の交わる線でもあります。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="O" style="--c:var(--c-O)">
-          <dt><span class="dot"></span>RAAN（昇交点赤経 Ω）<span class="en">Right Ascension of the Ascending Node</span></dt>
-          <dd>英語名を分解すると「昇交点（Ascending Node）の赤経（Right Ascension）」。つまり<b>昇交点が春分点から東へ何度の方角にあるか</b>です。傾けた軌道面を地軸のまわりにどれだけ回したかを表します。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="i" style="--c:var(--c-i)">
-          <dt><span class="dot"></span>赤道面 ／ 軌道面<span class="en">equatorial / orbital plane</span></dt>
-          <dd>赤道面は地球の赤道を含む平面（図の青い円盤）。軌道面は衛星の軌道を含む平面（緑の円盤）。この2枚の面のなす角が軌道傾斜角 <i>i</i> です。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="i" style="--c:var(--c-i)">
-          <dt><span class="dot"></span>順行 ／ 逆行<span class="en">prograde / retrograde</span></dt>
-          <dd>地球の自転と同じ東向きに回るのが順行（<i>i</i> &lt; 90°）、西向きに回るのが逆行（<i>i</i> &gt; 90°）。太陽同期軌道は <i>i</i> ≈ 98° のわずかな逆行軌道です。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="w" style="--c:var(--c-w)">
-          <dt><span class="dot"></span>近地点 ／ 遠地点<span class="en">perigee / apogee</span></dt>
-          <dd>楕円軌道で地球に最も近い点と最も遠い点。一般の天体では近点・遠点（periapsis / apoapsis）と呼びます。2点を結ぶ直線が<b>長軸線</b>で、その長さの半分が <i>a</i> です。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="e" style="--c:var(--c-e)">
-          <dt><span class="dot"></span>焦点<span class="en">focus</span></dt>
-          <dd>楕円には焦点が2つあり、地球の中心はその片方に位置します（ケプラーの第1法則）。楕円の中心から焦点までの距離が <i>ae</i> です。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="n" style="--c:var(--c-n)">
-          <dt><span class="dot"></span>3種類の近点角<span class="en">true / eccentric / mean anomaly</span></dt>
-          <dd>どれも「近地点から衛星がどれだけ進んだか」を表す角度です。<b>真近点角 ν</b> は実際の幾何学的な角度。<b>平均近点角 M</b> は時間に比例して一定の速さで増える架空の角度。<b>離心近点角 E</b> は両者をつなぐ補助角で、ケプラー方程式 M = E − e sin E で結ばれます。円軌道では3つとも一致します。</dd>
-        </div>
-        <div class="t" tabindex="0" data-k="" style="--c:var(--muted)">
-          <dt><span class="dot"></span>地心赤道慣性系（ECI）<span class="en">Earth-Centered Inertial</span></dt>
-          <dd>地球の中心を原点とし、X軸を春分点方向、Z軸を北極方向、Y軸をそれらと直交する向きに取った座標系。地球の自転と一緒に回らないため、軌道を記述する標準の座標系です。</dd>
-        </div>
-      </dl>
+      <h2 class="sec-t" data-i18n="glossary"></h2>
+      <dl class="gl" id="glossary"></dl>
     </section>
 
     <footer>
-      二体問題（摂動なし） μ = 398600.4418 km³/s²　Rₑ = 6378.137 km<br>
-      座標系：地心赤道慣性系（X = 春分点方向, Z = 北極）<br>
+      <span data-i18n="footer"></span><br>
       <a href="https://github.com/Ki-math/orbital-elements-viewer" target="_blank" rel="noopener">GitHub</a>
     </footer>
   </aside>
@@ -142,9 +111,10 @@
 <!-- 外部ライブラリ（three.js r128 + OrbitControls） -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-<!-- アプリ本体：計算 → 定義 → 表示 の順に読み込む -->
+<!-- アプリ本体：計算 → 内容 → 文言 → 表示 の順に読み込む -->
 <script src="js/orbitMechanics.js"></script>
 <script src="js/content.js"></script>
+<script src="js/i18n.js"></script>
 <script src="js/viewer.js"></script>
 </body>
 </html>

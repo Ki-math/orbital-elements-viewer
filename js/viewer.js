@@ -3,23 +3,27 @@
  * 軌道6要素ビューアの画面と3D表示。
  *
  * 構成
- *   1. 状態          state（表示中の6要素）と強調中の要素
+ *   1. 状態          state（表示中の6要素）、強調中の要素、J2 モードの状態
  *   2. 操作パネル    スライダー・プリセット・用語集の生成と同期
  *   3. 3Dシーン      three.js の描画オブジェクト生成（sceneKit）
  *   4. シーン更新    6要素から全オブジェクトの位置を計算し直す（updateScene）
- *   5. 諸元・解説    右パネルの数値と左下の解説カード
- *   6. 強調表示      選んだ要素に関係するものだけを明るくする
- *   7. 視点・再生    カメラ移動と真近点角のアニメーション
- *   8. 起動
+ *   5. J2 モード     交点の後退：Ω・ω の永年変化、残像、昇交点の軌跡
+ *   6. 諸元・解説    右パネルの数値と左下の解説カード
+ *   7. 強調表示      選んだ要素に関係するものだけを明るくする
+ *   8. 視点・再生    カメラ移動と時間の進め方
+ *   9. 言語切り替え
+ *  10. 起動
  *
- * 依存：THREE, THREE.OrbitControls, OrbitMechanics, OrbitContent
+ * 依存：THREE, THREE.OrbitControls, OrbitMechanics, OrbitContent, I18n
  */
 (function () {
   'use strict';
 
-  const {ELEMENTS, GROUPS, PRESETS} = window.OrbitContent;
+  const {ELEMENTS, GROUPS, PRESETS, GLOSSARY, EQUINOX_FIGURE} = window.OrbitContent;
   const OM = window.OrbitMechanics;
-  const D2R = Math.PI / 180;
+  const t = (key, ...args) => window.I18n.t(key, ...args);
+  const loc = obj => obj[window.I18n.lang];          // {ja, en} から現在の言語を取り出す
+  const D2R = Math.PI / 180, DAY = 86400;
   const $ = sel => document.querySelector(sel);
   const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
   const wrap360 = x => ((x % 360) + 360) % 360;
@@ -33,6 +37,9 @@
   let hoveredKey = null;              // マウスが乗っている要素
   const focusKey = () => hoveredKey || pinnedKey;
 
+  /** J2 モード：elapsed は経過時間 [s]、dO は Ω の累積変化 [deg]（360°で折り返さない） */
+  const j2 = {on: false, elapsed: 0, dO: 0, start: {...state}, lastGhostAt: 0};
+
   /** state（deg）→ OrbitMechanics 用の要素（rad） */
   const toRadians = s => ({a: s.a, e: s.e, inc: s.i * D2R, raan: s.O * D2R, argp: s.w * D2R, nu: s.n * D2R});
 
@@ -43,7 +50,9 @@
     if (key === 'n') setPlaying(false);
     activePreset = null;
     pinnedKey = key;
+    resetJ2Timeline();
     refreshAll();
+    recordJ2Frame(true);
     if (key === 'a' || key === 'e') zoomToFit();
   }
 
@@ -51,7 +60,9 @@
     Object.assign(state, preset.el);
     activePreset = preset.id;
     pinnedKey = null;
+    resetJ2Timeline();
     refreshAll();
+    recordJ2Frame(true);
     zoomToFit();
   }
 
@@ -67,17 +78,19 @@
      ======================================================= */
   function buildElementRows() {
     const wrap = $('#elements');
+    wrap.innerHTML = '';
     GROUPS.forEach((group, gi) => {
+      const g = loc(group);
       const grp = document.createElement('div');
       grp.className = 'grp';
-      grp.innerHTML = `<h3><span class="step">${gi + 1}</span>${group.title}<em>${group.note}</em></h3>`;
+      grp.innerHTML = `<h3><span class="step">${gi + 1}</span>${g.title}<em>${g.note}</em></h3>`;
       group.keys.forEach(key => grp.appendChild(buildElementRow(key)));
       wrap.appendChild(grp);
     });
   }
 
   function buildElementRow(key) {
-    const E = ELEMENTS[key];
+    const E = ELEMENTS[key], L = loc(E);
     const row = document.createElement('div');
     row.className = 'el';
     row.dataset.k = key;
@@ -85,13 +98,13 @@
     row.innerHTML = `
       <div class="el-head" tabindex="0" role="button" aria-pressed="false">
         <span class="sym">${E.sym}</span>
-        <span class="nm"><b>${E.name}</b><small>${E.what}</small></span>
+        <span class="nm"><b>${L.name}</b><small>${L.what}</small></span>
         <span class="val">
-          <input class="num" id="num-${key}" type="number" min="${E.min}" max="${E.max}" step="${E.step}" aria-label="${E.name}">
+          <input class="num" id="num-${key}" type="number" min="${E.min}" max="${E.max}" step="${E.step}" aria-label="${L.name}">
           <span class="unit">${E.unit}</span>
         </span>
       </div>
-      <input type="range" id="rng-${key}" min="${E.min}" max="${E.max}" step="${E.step}" aria-label="${E.name}">
+      <input type="range" id="rng-${key}" min="${E.min}" max="${E.max}" step="${E.step}" aria-label="${L.name}">
       <div class="warn" id="warn-${key}" hidden></div>`;
 
     const head = row.querySelector('.el-head');
@@ -114,28 +127,64 @@
 
   function buildPresets() {
     const wrap = $('#presets');
+    wrap.innerHTML = '';
     PRESETS.forEach(p => {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'chip';
-      b.textContent = p.name;
+      b.textContent = loc(p);
       b.dataset.id = p.id;
       b.addEventListener('click', () => applyPreset(p));
       wrap.appendChild(b);
     });
   }
 
-  function bindGlossary() {
-    document.querySelectorAll('#glossary .t').forEach(item => {
-      const key = item.dataset.k || null;
-      const enter = () => { hoveredKey = key; item.classList.add('on'); refreshFocus(); };
-      const leave = () => { hoveredKey = null; item.classList.remove('on'); refreshFocus(); };
-      item.addEventListener('mouseenter', enter);
-      item.addEventListener('mouseleave', leave);
-      item.addEventListener('focus', enter);
-      item.addEventListener('blur', leave);
-      item.addEventListener('click', () => { if (key) { pinnedKey = key; refreshFocus(); } });
+  function buildGlossary() {
+    const wrap = $('#glossary');
+    wrap.innerHTML = '';
+    GLOSSARY.forEach(item => {
+      const L = loc(item);
+      const div = document.createElement('div');
+      div.className = 't';
+      div.tabIndex = 0;
+      div.dataset.k = item.key;
+      div.style.setProperty('--c', item.color);
+      div.innerHTML = `
+        <dt><span class="dot"></span>${L.term}<span class="en">${L.alt}</span></dt>
+        <dd>${L.body}${item.figure === 'equinox' ? equinoxFigure() : ''}</dd>`;
+      const key = item.key || null;
+      const enter = () => { hoveredKey = key; div.classList.add('on'); refreshFocus(); };
+      const leave = () => { hoveredKey = null; div.classList.remove('on'); refreshFocus(); };
+      div.addEventListener('mouseenter', enter);
+      div.addEventListener('mouseleave', leave);
+      div.addEventListener('focus', enter);
+      div.addEventListener('blur', leave);
+      div.addEventListener('click', () => { if (key) { pinnedKey = key; refreshFocus(); } });
+      wrap.appendChild(div);
     });
+  }
+
+  /** 春分点の説明図（地球の公転軌道上で、春分点方向が変わらないことを示す） */
+  function equinoxFigure() {
+    const f = loc(EQUINOX_FIGURE);
+    return `
+      <div class="fig"><svg viewBox="0 0 320 132" role="img" aria-label="${f.aria}">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#AEB9CC"/></marker></defs>
+        <g font-family="IBM Plex Sans JP,sans-serif" font-size="10">
+          <ellipse cx="160" cy="62" rx="120" ry="40" fill="none" stroke="#34466A" stroke-width="1.2"/>
+          <text x="316" y="18" fill="#5A6883" text-anchor="end">${f.orbit}</text>
+          <circle cx="160" cy="62" r="10" fill="#F2B84B"/>
+          <text x="160" y="84" fill="#F2B84B" text-anchor="middle">${f.sun}</text>
+          <circle cx="40" cy="62" r="6" fill="#3F6FB8"/>
+          <line x1="48" y1="62" x2="146" y2="62" stroke="#AEB9CC" stroke-width="1.5" marker-end="url(#ah)"/>
+          <text x="97" y="55" fill="#E7ECF4" font-size="11" text-anchor="middle">${f.dir}</text>
+          <text x="40" y="84" fill="#8C99B0" text-anchor="middle">${f.day}</text>
+          <circle cx="160" cy="102" r="6" fill="#3F6FB8"/>
+          <line x1="168" y1="102" x2="236" y2="102" stroke="#AEB9CC" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+          <text x="160" y="124" fill="#8C99B0" text-anchor="middle">${f.later}</text>
+          <text x="242" y="106" fill="#8C99B0">${f.same}</text>
+        </g>
+      </svg></div>`;
   }
 
   function bindHover(el, key) {
@@ -150,10 +199,8 @@
   /** スライダー・数値欄を state に合わせる */
   function syncInputs() {
     for (const key in ELEMENTS) setInputValue(key, state[key]);
-    const noNode = state.i <= 0.05 || state.i >= 179.95;
-    const noPerigee = state.e < 1e-4;
-    showWarning('O', noNode, '傾斜角が 0° / 180° のため軌道面と赤道面が重なり、昇交点が存在しません。Ω は形式上の値です。');
-    showWarning('w', noPerigee, '離心率が 0 のため近地点が決まらず、ω は形式上の値です。');
+    showWarning('O', state.i <= 0.05 || state.i >= 179.95, t('warnNoNode'));
+    showWarning('w', state.e < 1e-4, t('warnNoPerigee'));
   }
 
   function setInputValue(key, value) {
@@ -188,9 +235,9 @@
 
   /** ECI（X=春分点, Z=北極）→ three.js 座標（Y が上） */
   const toScene = v => new THREE.Vector3(v[0], v[2], -v[1]);
-  const COLOR = {a: 0xF2B84B, e: 0xF0795A, i: 0x3CC7B3, O: 0xA38BF6, w: 0x5AA9F2, n: 0xB9DB67,
+  const COLOR = {a: 0xF2B84B, e: 0xF0795A, i: 0x3CC7B3, O: 0xA38BF6, w: 0x5AA9F2, n: 0xB9DB67, j2: 0xE58BD0,
                  orbit: 0xE7ECF4, muted: 0x8C99B0, grid: 0x34466A, equator: 0x7A90C0};
-  const ARC_SEG = 64;
+  const ARC_SEG = 64, ORBIT_PTS = 257;
 
   /**
    * sceneKit：描画オブジェクトを作るヘルパー群。
@@ -203,7 +250,9 @@
     track(mat, base, keys, dim = 0.1) {
       mat.transparent = true;
       mat.opacity = base;
-      tracked.push({mat, base, keys, dim});
+      const entry = {mat, base, keys, dim};
+      tracked.push(entry);
+      return entry;
     },
     line(nPts, color, base, keys, dim, onTop = false) {
       const g = new THREE.BufferGeometry();
@@ -212,7 +261,7 @@
       const l = new THREE.Line(g, m);
       l.frustumCulled = false;
       if (onTop) l.renderOrder = 10;
-      sceneKit.track(m, base, keys, dim);
+      l.userData.track = sceneKit.track(m, base, keys, dim);
       scene.add(l);
       return l;
     },
@@ -282,8 +331,8 @@
   function arcPoints(c, u, v, r, ang, n = ARC_SEG) {
     const pts = [];
     for (let k = 0; k <= n; k++) {
-      const t = ang * k / n;
-      pts.push(c.clone().addScaledVector(u, r * Math.cos(t)).addScaledVector(v, r * Math.sin(t)));
+      const s = ang * k / n;
+      pts.push(c.clone().addScaledVector(u, r * Math.cos(s)).addScaledVector(v, r * Math.sin(s)));
     }
     return pts;
   }
@@ -333,7 +382,7 @@
     ascNode:  K.ball(C.O, 1, ['O', 'i', 'w'], .15),
     descNode: K.ball(C.O, .5, ['O', 'i'], .15),
     // 楕円
-    orbit:    K.line(257, C.orbit, 1, ['a', 'e', 'n', 'w'], .4),
+    orbit:    K.line(ORBIT_PTS, C.orbit, 1, ['a', 'e', 'n', 'w'], .4),
     apsides:  K.line(2, C.a, .45, ['a', 'w', 'e'], .12),
     semiMaj:  K.line(2, C.a, 1, ['a'], .06, true),
     aeSeg:    K.line(2, C.e, 1, ['e'], .06, true),
@@ -356,40 +405,48 @@
   K.track(velArrow.cone.material, .9, ['n'], .2);
   scene.add(velArrow);
 
-  // --- 3D 空間に貼り付く HTML ラベル ---
+  // --- 3D 空間に貼り付く HTML ラベル（textKey は i18n のキー、空なら毎回 innerHTML を書き換える） ---
   const labels = {};
-  function addLabel(id, html, color, keys, cls = '') {
+  function addLabel(id, textKey, color, keys, cls = '') {
     const el = document.createElement('div');
     el.className = 'lbl ' + cls;
-    el.innerHTML = html;
     if (color) el.style.color = color;
     $('#labels').appendChild(el);
-    labels[id] = {el, pos: new THREE.Vector3(), keys, focus: 1, hidden: false};
+    labels[id] = {el, textKey, pos: new THREE.Vector3(), keys, focus: 1, hidden: false};
   }
-  addLabel('x',    '♈ 春分点方向 X', '#AEB9CC', ['O']);
-  addLabel('z',    '北極 Z', '#AEB9CC', null);
-  addLabel('t90',  '90°', null, ['O'], 'tick');
-  addLabel('t180', '180°', null, ['O'], 'tick');
-  addLabel('t270', '270°', null, ['O'], 'tick');
-  addLabel('asc',  '☊ 昇交点', 'var(--c-O)', ['O', 'i', 'w']);
-  addLabel('desc', '☋ 降交点', 'var(--c-O)', ['O', 'i']);
-  addLabel('peri', '近地点', 'var(--c-w)', ['a', 'e', 'w', 'n']);
-  addLabel('apo',  '遠地点', 'var(--c-a)', ['a', 'e']);
-  addLabel('sat',  '衛星', 'var(--c-n)', ['n']);
-  addLabel('angO', '', 'var(--c-O)', ['O'], 'ang');
-  addLabel('angI', '', 'var(--c-i)', ['i'], 'ang');
-  addLabel('angW', '', 'var(--c-w)', ['w'], 'ang');
-  addLabel('angN', '', 'var(--c-n)', ['n'], 'ang');
-  addLabel('lenA', '<i>a</i>', 'var(--c-a)', ['a'], 'ang');
-  addLabel('lenAE','<i>ae</i>', 'var(--c-e)', ['e'], 'ang');
-  addLabel('eqPl', '赤道面', null, ['i', 'O'], 'plane');
-  addLabel('orPl', '軌道面', 'var(--c-i)', ['i', 'O'], 'plane');
+  function renderLabelTexts() {
+    for (const id in labels) if (labels[id].textKey) labels[id].el.innerHTML = t(labels[id].textKey);
+  }
+  addLabel('x',    'lblX', '#AEB9CC', ['O']);
+  addLabel('z',    'lblZ', '#AEB9CC', null);
+  addLabel('t90',  null, null, ['O'], 'tick');
+  addLabel('t180', null, null, ['O'], 'tick');
+  addLabel('t270', null, null, ['O'], 'tick');
+  addLabel('asc',  'lblAsc', 'var(--c-O)', ['O', 'i', 'w']);
+  addLabel('desc', 'lblDesc', 'var(--c-O)', ['O', 'i']);
+  addLabel('peri', 'lblPeri', 'var(--c-w)', ['a', 'e', 'w', 'n']);
+  addLabel('apo',  'lblApo', 'var(--c-a)', ['a', 'e']);
+  addLabel('sat',  'lblSat', 'var(--c-n)', ['n']);
+  addLabel('angO', null, 'var(--c-O)', ['O'], 'ang');
+  addLabel('angI', null, 'var(--c-i)', ['i'], 'ang');
+  addLabel('angW', null, 'var(--c-w)', ['w'], 'ang');
+  addLabel('angN', null, 'var(--c-n)', ['n'], 'ang');
+  addLabel('lenA', null, 'var(--c-a)', ['a'], 'ang');
+  addLabel('lenAE', null, 'var(--c-e)', ['e'], 'ang');
+  addLabel('eqPl', 'lblEq', null, ['i', 'O'], 'plane');
+  addLabel('orPl', 'lblOrb', 'var(--c-i)', ['i', 'O'], 'plane');
+  labels.t90.el.textContent = '90°';
+  labels.t180.el.textContent = '180°';
+  labels.t270.el.textContent = '270°';
+  labels.lenA.el.innerHTML = '<i>a</i>';
+  labels.lenAE.el.innerHTML = '<i>ae</i>';
 
   /* =======================================================
      4. シーン更新（長さの単位は地球半径 RE = 1）
      ======================================================= */
   let sceneRadius = 3;
   let summary = null;
+  const frame3d = {orbitPts: [], ascPos: new THREE.Vector3()};   // J2 の残像・軌跡が参照する最新形状
 
   function updateScene() {
     const el = toRadians(state);
@@ -424,11 +481,13 @@
 
     // 楕円と特徴点
     const orbitPts = [];
-    for (let k = 0; k <= 256; k++) orbitPts.push(posAt(k / 256 * 2 * Math.PI));
+    for (let k = 0; k < ORBIT_PTS; k++) orbitPts.push(posAt(k / (ORBIT_PTS - 1) * 2 * Math.PI));
     setPoints(obj.orbit, orbitPts);
     const ascPos = posAt(-argp), descPos = posAt(Math.PI - argp);
     const periPos = posAt(0), apoPos = posAt(Math.PI), satPos = posAt(nu);
     const centerPos = P.clone().multiplyScalar(-e * a / RE);
+    frame3d.orbitPts = orbitPts;
+    frame3d.ascPos.copy(ascPos);
     obj.ascNode.position.copy(ascPos);    obj.ascNode.scale.setScalar(ms * .85);
     obj.descNode.position.copy(descPos);  obj.descNode.scale.setScalar(ms * .7);
     obj.center.position.copy(centerPos);  obj.center.scale.setScalar(ms * .55);
@@ -488,6 +547,7 @@
     labels.orPl.pos.copy(M).multiplyScalar(R * 0.9);
 
     updateReadouts();
+    updateJ2Readouts();
     renderExplain();
   }
 
@@ -502,22 +562,156 @@
   }
 
   /* =======================================================
-     5. 諸元・解説
+     5. J2 モード（交点の後退）
      ======================================================= */
-  const fmtKm = v => `${Math.round(v).toLocaleString('ja-JP')} km`;
+  const GHOST_COUNT = 36;          // 残像として残す過去の軌道の数
+  const GHOST_STEP_DEG = 10;       // Ω がこれだけ変わるごとに残像を1本残す
+  const TRACE_MAX = 3000;          // 昇交点の軌跡の最大点数
+
+  const ghosts = [];               // {line, mat, age}
+  for (let k = 0; k < GHOST_COUNT; k++) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ORBIT_PTS * 3), 3));
+    const mat = new THREE.LineBasicMaterial({color: COLOR.j2, transparent: true, opacity: 0, depthWrite: false});
+    const line = new THREE.Line(g, mat);
+    line.frustumCulled = false;
+    line.visible = false;
+    scene.add(line);
+    ghosts.push({line, mat});
+  }
+  let ghostHead = 0, ghostUsed = 0;
+
+  const trace = {line: K.line(TRACE_MAX, COLOR.j2, .95, ['O', 'i'], .15), pts: []};
+  trace.line.visible = false;
+
+  /** J2 の永年変化率 [deg/day] */
+  function j2RatesDegPerDay() {
+    const r = OM.j2SecularRates(state.a, state.e, state.i * D2R);
+    return {raan: r.raanDot / D2R * DAY, argp: r.argpDot / D2R * DAY};
+  }
+
+  function clearGhostsAndTrace() {
+    ghosts.forEach(g => { g.line.visible = false; });
+    ghostHead = 0; ghostUsed = 0;
+    trace.pts = [];
+    setPoints(trace.line, []);
+  }
+
+  /** 手動で要素を変えたとき：その状態を J2 の開始状態にする */
+  function resetJ2Timeline() {
+    j2.elapsed = 0;
+    j2.dO = 0;
+    j2.lastGhostAt = 0;
+    j2.start = {...state};
+    clearGhostsAndTrace();
+  }
+
+  function restoreJ2Start() {
+    Object.assign(state, j2.start);
+    j2.elapsed = 0; j2.dO = 0; j2.lastGhostAt = 0;
+    clearGhostsAndTrace();
+    syncInputs();
+    updateScene();
+    recordJ2Frame(true);
+  }
+
+  function setJ2(on) {
+    j2.on = on;
+    $('#j2-on').checked = on;
+    $('#j2').classList.toggle('on', on);
+    $('#j2-body').hidden = !on;
+    $('#j2-hint').hidden = on;
+    trace.line.visible = on;
+    document.querySelectorAll('#speed [data-j2-only]').forEach(b => { b.hidden = !on; });
+    if (!on && isDayScale()) selectSpeed('lap');
+    resetJ2Timeline();
+    if (on) recordJ2Frame(true);
+    updateJ2Readouts();
+    updateGhostOpacity();
+    renderExplain();
+  }
+
+  /** 1フレーム分の J2 による Ω・ω の変化 */
+  function advanceJ2(dtSim) {
+    const rates = OM.j2SecularRates(state.a, state.e, state.i * D2R);
+    const dO = rates.raanDot * dtSim / D2R;
+    const noNode = state.i <= 0.05 || state.i >= 179.95;
+    state.O = wrap360(state.O + dO);
+    if (state.e >= 1e-4 && !noNode) state.w = wrap360(state.w + rates.argpDot * dtSim / D2R);
+    j2.dO += dO;
+    j2.elapsed += dtSim;
+  }
+
+  /** 昇交点の軌跡に点を足し、Ω が一定量変わったら残像を残す */
+  function recordJ2Frame(force = false) {
+    if (!j2.on) return;
+    const last = trace.pts[trace.pts.length - 1];
+    if (force || !last || last.distanceToSquared(frame3d.ascPos) > 1e-5) {
+      trace.pts.push(frame3d.ascPos.clone());
+      if (trace.pts.length > TRACE_MAX) trace.pts.shift();
+      setPoints(trace.line, trace.pts);
+    }
+    if (force || Math.abs(j2.dO - j2.lastGhostAt) >= GHOST_STEP_DEG) {
+      j2.lastGhostAt = j2.dO;
+      pushGhost(frame3d.orbitPts);
+    }
+  }
+
+  function pushGhost(pts) {
+    const g = ghosts[ghostHead];
+    setPoints(g.line, pts);
+    g.line.visible = true;
+    g.order = performance.now();
+    ghostHead = (ghostHead + 1) % GHOST_COUNT;
+    ghostUsed = Math.min(GHOST_COUNT, ghostUsed + 1);
+    updateGhostOpacity();
+  }
+
+  /** 新しい残像ほど濃く、古いほど薄く。別の要素を強調中はさらに薄くする */
+  function updateGhostOpacity() {
+    const key = focusKey();
+    const focus = (!key || key === 'O' || key === 'i') ? 1 : 0.25;
+    for (let age = 0; age < ghostUsed; age++) {
+      const idx = (ghostHead - 1 - age + GHOST_COUNT) % GHOST_COUNT;
+      ghosts[idx].mat.opacity = (0.32 - 0.26 * age / GHOST_COUNT) * focus;
+    }
+  }
+
+  function updateJ2Readouts() {
+    if (!j2.on) return;
+    const r = j2RatesDegPerDay();
+    const dirText = Math.abs(r.raan) < 1e-4 ? t('stopped') : r.raan < 0 ? t('west') : t('east');
+    $('#j2-raan').textContent = t('perDay', r.raan);
+    $('#j2-argp').textContent = t('perDay', r.argp);
+    $('#j2-cycle').textContent = t('dayCount', Math.abs(r.raan) < 1e-4 ? Infinity : 360 / Math.abs(r.raan));
+    $('#j2-elapsed').textContent = t('elapsed', j2.elapsed / DAY);
+    $('#j2-dO').textContent = t('deltaO', j2.dO, dirText);
+
+    const notes = [];
+    const sunRate = 360 / OM.SIDEREAL_YEAR_DAYS;
+    if (Math.abs(r.raan - sunRate) < 0.02) notes.push(t('j2Sso'));
+    if (Math.abs(Math.cos(state.i * D2R)) < 0.005) notes.push(t('j2Polar'));
+    if (state.e >= 1e-3 && Math.abs(r.argp) < 0.02 && Math.abs(Math.cos(state.i * D2R)) > 0.005) notes.push(t('j2Critical'));
+    $('#j2-note').textContent = notes.join(' ');
+    $('#j2-frozen').hidden = !(playing && isDayScale());
+  }
+
+  /* =======================================================
+     6. 諸元・解説
+     ======================================================= */
   function fmtPeriod(s) {
-    if (s < 3 * 3600) return `${(s / 60).toFixed(1)} 分`;
-    if (s < 3 * 86400) return `${(s / 3600).toFixed(2)} 時間`;
-    return `${(s / 86400).toFixed(2)} 日`;
+    if (s < 3 * 3600) return t('minutes', s / 60);
+    if (s < 3 * 86400) return t('hours', s / 3600);
+    return t('days', s / 86400);
   }
 
   function updateReadouts() {
     const s = summary;
     const gDeg = s.flightPathAngle / D2R;
-    $('#r-hp').textContent = fmtKm(s.perigeeAlt);
-    $('#r-ha').textContent = fmtKm(s.apogeeAlt);
+    $('#r-hp').textContent = t('km', s.perigeeAlt);
+    $('#r-ha').textContent = t('km', s.apogeeAlt);
     $('#r-T').textContent = fmtPeriod(s.period);
-    $('#r-alt').textContent = fmtKm(s.altitude);
+    $('#r-alt').textContent = t('km', s.altitude);
     $('#r-v').textContent = `${s.speed.toFixed(3)} km/s`;
     $('#r-g').textContent = `${gDeg >= 0 ? '+' : ''}${gDeg.toFixed(2)}°`;
     const fmt = (x, d) => x.toFixed(d).padStart(10);
@@ -526,8 +720,8 @@
       `v = [${s.vECI.map(x => fmt(x, 4)).join(',')} ] km/s`;
 
     const alert = $('#r-alert');
-    if (s.perigeeAlt < 0) alert.innerHTML = '<div class="alert bad">近地点が地表より下にあります。この軌道は地球に衝突します。</div>';
-    else if (s.perigeeAlt < 150) alert.innerHTML = '<div class="alert warn">近地点高度が 150 km 未満です。大気抵抗ですぐに落下する高さです。</div>';
+    if (s.perigeeAlt < 0) alert.innerHTML = `<div class="alert bad">${t('alertCrash')}</div>`;
+    else if (s.perigeeAlt < 150) alert.innerHTML = `<div class="alert warn">${t('alertLow')}</div>`;
     else alert.innerHTML = '';
   }
 
@@ -536,73 +730,81 @@
     const {a, e} = state, s = summary;
     switch (key) {
       case 'a':
-        return `周期 ${fmtPeriod(s.period)}、平均的な高度はおよそ ${fmtKm(a - OM.RE)}`;
+        return t('itA', fmtPeriod(s.period), t('km', a - OM.RE));
       case 'e':
-        return e < 0.001 ? '実質的に円軌道。高度はほぼ一定です'
-          : `近地点 ${fmtKm(s.perigeeAlt)} ↔ 遠地点 ${fmtKm(s.apogeeAlt)}（中心のずれ ae = ${fmtKm(a * e)}）`;
+        return e < 0.001 ? t('itECirc') : t('itE', t('km', s.perigeeAlt), t('km', s.apogeeAlt), t('km', a * e));
       case 'i': {
         const x = state.i;
-        if (x < 0.05) return '赤道軌道（順行）。昇交点は存在しません';
-        if (x > 179.95) return '赤道軌道（逆行）。昇交点は存在しません';
-        if (x > 96 && x < 100.5 && a < 8200) return '逆行寄りの極軌道。太陽同期軌道に近い傾き';
-        if (Math.abs(x - 90) < 0.5) return '極軌道。両極の真上を通ります';
-        return x < 90 ? `順行軌道（東向き）。緯度 ±${x.toFixed(1)}° までの地域を通過`
-                      : `逆行軌道（西向き）。緯度 ±${(180 - x).toFixed(1)}° までの地域を通過`;
+        if (x < 0.05) return t('itIEqPro');
+        if (x > 179.95) return t('itIEqRetro');
+        if (x > 96 && x < 100.5 && a < 8200) return t('itISso');
+        if (Math.abs(x - 90) < 0.5) return t('itIPolar');
+        return x < 90 ? t('itIPro', x.toFixed(1)) : t('itIRetro', (180 - x).toFixed(1));
       }
       case 'O':
-        return (state.i < 0.05 || state.i > 179.95) ? '軌道面が赤道面と重なっているため、Ω は意味を持ちません'
-          : `昇交点は ♈ から東へ ${state.O.toFixed(1)}° の方角`;
+        return (state.i < 0.05 || state.i > 179.95) ? t('itONone') : t('itO', state.O.toFixed(1));
       case 'w': {
-        if (e < 1e-4) return '円軌道なので近地点がなく、ω は意味を持ちません';
+        if (e < 1e-4) return t('itWNone');
         const lat = Math.asin(Math.sin(state.i * D2R) * Math.sin(state.w * D2R)) / D2R;
-        return `近地点は緯度 ${lat >= 0 ? '北' : '南'} ${Math.abs(lat).toFixed(1)}° の上空（遠地点はその反対側）`;
+        return t('itW', lat >= 0, Math.abs(lat).toFixed(1));
       }
       case 'n': {
         const x = state.n;
-        const where = (x < 2 || x > 358) ? '近地点付近（最も速い）'
-          : Math.abs(x - 180) < 2 ? '遠地点付近（最も遅い）'
-          : x < 180 ? '近地点を過ぎて上昇中' : '近地点へ向けて降下中';
-        return `${where}。速度 ${s.speed.toFixed(3)} km/s、高度 ${fmtKm(s.altitude)}`;
+        const where = (x < 2 || x > 358) ? t('itNPeri') : Math.abs(x - 180) < 2 ? t('itNApo')
+          : x < 180 ? t('itNUp') : t('itNDown');
+        return t('itN', where, s.speed.toFixed(3), t('km', s.altitude));
       }
     }
     return '';
   }
 
-  const OVERVIEW_HTML = `
-    <div class="ex-h"><b>6要素は「形 → 面 → 向き → 位置」の順に決まる</b></div>
-    <div class="order">
-      <span><i style="color:var(--c-a)">a</i>・<i style="color:var(--c-e)">e</i> 楕円の大きさと形</span><span class="arrow">→</span>
-      <span><i style="color:var(--c-i)">i</i>・<i style="color:var(--c-O)">Ω</i> 軌道面を傾けて回す</span><span class="arrow">→</span>
-      <span><i style="color:var(--c-w)">ω</i> 面内で楕円を回す</span><span class="arrow">→</span>
-      <span><i style="color:var(--c-n)">ν</i> 衛星を置く</span>
-    </div>
-    <p class="tech">近点座標系 → ECI：R = R<sub>z</sub>(Ω) · R<sub>x</sub>(i) · R<sub>z</sub>(ω)（3-1-3 回転）</p>`;
+  function overviewHtml() {
+    return `
+      <div class="ex-h"><b>${t('overviewTitle')}</b></div>
+      <div class="order">
+        <span><i style="color:var(--c-a)">a</i>・<i style="color:var(--c-e)">e</i> ${t('ovShape')}</span><span class="arrow">→</span>
+        <span><i style="color:var(--c-i)">i</i>・<i style="color:var(--c-O)">Ω</i> ${t('ovPlane')}</span><span class="arrow">→</span>
+        <span><i style="color:var(--c-w)">ω</i> ${t('ovOrient')}</span><span class="arrow">→</span>
+        <span><i style="color:var(--c-n)">ν</i> ${t('ovPlace')}</span>
+      </div>
+      <p class="tech">${t('ovTech')}</p>`;
+  }
+
+  function j2CardHtml() {
+    const r = j2RatesDegPerDay();
+    const still = Math.abs(r.raan) < 1e-4;
+    const dir = still ? t('stopped') : r.raan < 0 ? t('west') : t('east');
+    return `
+      <div class="ex-h"><span class="s" style="color:var(--c-j2)">J₂</span><b>${t('j2CardTitle')}</b></div>
+      <p>${t('j2CardBody')}</p>
+      <p class="now">${t('j2CardNow', t('perDay', r.raan), dir, t('dayCount', still ? Infinity : 360 / Math.abs(r.raan)))}</p>`;
+  }
 
   function renderExplain() {
     const box = $('#explain');
     const key = focusKey();
-    if (!key) { box.innerHTML = OVERVIEW_HTML; return; }
-    const E = ELEMENTS[key];
+    if (!key) { box.innerHTML = j2.on ? j2CardHtml() : overviewHtml(); return; }
+    const E = ELEMENTS[key], L = loc(E);
     box.innerHTML = `
       <div class="ex-h">
-        <span class="s" style="color:var(--c-${key})">${E.sym}</span><b>${E.name}</b><span class="k">${E.what}</span>
-        ${pinnedKey === key ? '<button class="x" type="button" id="unpin">強調を解除</button>' : ''}
+        <span class="s" style="color:var(--c-${key})">${E.sym}</span><b>${L.name}</b><span class="k">${L.what}</span>
+        ${pinnedKey === key ? `<button class="x" type="button" id="unpin">${t('unpin')}</button>` : ''}
       </div>
-      <p class="ex-en">${E.en}</p>
-      <p>${E.desc}</p>
+      <p class="ex-en">${L.alt}</p>
+      <p>${L.desc}</p>
       <p class="now">${interpretValue(key)}</p>`;
     const unpin = $('#unpin');
     if (unpin) unpin.addEventListener('click', () => { pinnedKey = null; refreshFocus(); });
   }
 
   /* =======================================================
-     6. 強調表示
+     7. 強調表示
      ======================================================= */
   const isRelated = (keys, key) => !key || !keys || keys.includes(key);
 
   function refreshFocus() {
     const key = focusKey();
-    tracked.forEach(t => { t.mat.opacity = isRelated(t.keys, key) ? t.base : t.base * t.dim; });
+    tracked.forEach(tr => { tr.mat.opacity = isRelated(tr.keys, key) ? tr.base : tr.base * tr.dim; });
     for (const id in labels) labels[id].focus = isRelated(labels[id].keys, key) ? 1 : 0.1;
     document.querySelectorAll('.el').forEach(row => {
       const k = row.dataset.k;
@@ -611,11 +813,12 @@
       row.classList.toggle('dim', !!key && k !== key);
       row.querySelector('.el-head').setAttribute('aria-pressed', String(k === pinnedKey));
     });
+    updateGhostOpacity();
     renderExplain();
   }
 
   /* =======================================================
-     7. 視点・再生
+     8. 視点・再生
      ======================================================= */
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let camTween = null;
@@ -644,9 +847,9 @@
   function viewDirection(kind) {
     const B = OM.perifocalBasis(state.O * D2R, state.i * D2R, state.w * D2R);
     const nudge = v => {
-      const t = toScene(v);
-      if (Math.abs(t.clone().normalize().y) > 0.999) t.add(new THREE.Vector3(0.02, 0, 0.02));
-      return t;
+      const tv = toScene(v);
+      if (Math.abs(tv.clone().normalize().y) > 0.999) tv.add(new THREE.Vector3(0.02, 0, 0.02));
+      return tv;
     };
     switch (kind) {
       case 'north': return nudge([0.01, -0.01, 1]);
@@ -667,24 +870,38 @@
   }
 
   let playing = false;
-  let speedMode = 'lap';      // 'lap' = 1周8秒、数値 = 実時間の倍率
-  const ICON_PLAY  = '<svg viewBox="0 0 10 10"><path d="M1 0l9 5-9 5z"/></svg><span>再生</span>';
-  const ICON_PAUSE = '<svg viewBox="0 0 10 10"><path d="M1 0h3v10H1zM6 0h3v10H6z"/></svg><span>停止</span>';
+  let speedMode = 'lap';      // 'lap' = 1周8秒、数値 = 実時間の倍率（86400 = 1日/秒）
+
+  function selectSpeed(v) {
+    speedMode = v;
+    document.querySelectorAll('#speed button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  }
+
+  /** 現在の再生速度（実時間の何倍か） */
+  const simRate = () => speedMode === 'lap' ? summary.period / 8 : Number(speedMode);
+  /** 日単位の再生か。このときは1秒に何十周もするので衛星の位置を固定する */
+  const isDayScale = () => speedMode !== 'lap' && Number(speedMode) >= DAY;
 
   function setPlaying(on) {
     playing = on;
-    $('#play').innerHTML = on ? ICON_PAUSE : ICON_PLAY;
+    const icon = on ? '<path d="M1 0h3v10H1zM6 0h3v10H6z"/>' : '<path d="M1 0l9 5-9 5z"/>';
+    $('#play').innerHTML = `<svg viewBox="0 0 10 10">${icon}</svg><span>${t(on ? 'pause' : 'play')}</span>`;
+    if (j2.on) updateJ2Readouts();
   }
 
-  /** 平均近点角を一定速度で進め、ケプラー方程式で真近点角に戻す */
-  function advanceTrueAnomaly(dt) {
+  /** 時間を dt [s] 進める。真近点角はケプラー方程式で、Ω・ω は J2 の永年変化で動かす */
+  function advanceTime(dt) {
     if (!playing) return;
-    const meanMotion = Math.sqrt(OM.MU / state.a ** 3);
-    const dM = speedMode === 'lap' ? 2 * Math.PI * dt / 8 : meanMotion * dt * Number(speedMode);
-    const M = OM.trueToMeanAnomaly(state.n * D2R, state.e) + dM;
-    state.n = wrap360(OM.meanToTrueAnomaly(M, state.e) / D2R);
-    setInputValue('n', state.n);
+    const dtSim = dt * simRate();
+    if (!isDayScale()) {
+      const meanMotion = Math.sqrt(OM.MU / state.a ** 3);
+      const M = OM.trueToMeanAnomaly(state.n * D2R, state.e) + meanMotion * dtSim;
+      state.n = wrap360(OM.meanToTrueAnomaly(M, state.e) / D2R);
+    }
+    if (j2.on) advanceJ2(dtSim);
+    if (j2.on) syncInputs(); else setInputValue('n', state.n);
     updateScene();
+    recordJ2Frame();
   }
 
   /* ---------- 描画ループ ---------- */
@@ -702,8 +919,8 @@
     const A = d.dot(d), Bq = 2 * c.dot(d), Cq = c.dot(c) - 1;
     const disc = Bq * Bq - 4 * A * Cq;
     if (disc < 0) return false;
-    const t = (-Bq - Math.sqrt(disc)) / (2 * A);
-    return t > 0 && t < 0.995;
+    const s = (-Bq - Math.sqrt(disc)) / (2 * A);
+    return s > 0 && s < 0.995;
   }
 
   const projV = new THREE.Vector3();
@@ -724,7 +941,7 @@
   function frame(now) {
     const dt = Math.min(0.05, (now - lastTime) / 1000);
     lastTime = now;
-    advanceTrueAnomaly(dt);
+    advanceTime(dt);
     stepCameraTween(now);
     controls.update();
     renderer.render(scene, camera);
@@ -733,21 +950,38 @@
   }
 
   /* =======================================================
-     8. 起動
+     9. 言語切り替え
      ======================================================= */
-  buildElementRows();
-  buildPresets();
-  bindGlossary();
+  function applyLanguage() {
+    window.I18n.applyStatic();
+    document.querySelectorAll('#lang button').forEach(b => b.classList.toggle('on', b.dataset.v === window.I18n.lang));
+    buildElementRows();
+    buildPresets();
+    buildGlossary();
+    renderLabelTexts();
+    setPlaying(playing);
+    syncInputs();
+    markPresets();
+    updateScene();
+    refreshFocus();
+  }
+
+  /* =======================================================
+     10. 起動
+     ======================================================= */
   bindSegmented('#views', kind => flyTo(viewDirection(kind), fitDistance()));
-  bindSegmented('#speed', v => { speedMode = v; });
+  bindSegmented('#speed', v => { speedMode = v; if (j2.on) updateJ2Readouts(); });
+  bindSegmented('#lang', lang => window.I18n.setLang(lang));
+  window.I18n.onChange(applyLanguage);
   $('#play').addEventListener('click', () => setPlaying(!playing));
+  $('#j2-on').addEventListener('change', ev => setJ2(ev.target.checked));
+  $('#j2-reset').addEventListener('click', restoreJ2Start);
   document.addEventListener('keydown', ev => {
     if (ev.key === 'Escape' && pinnedKey) { pinnedKey = null; refreshFocus(); }
   });
   new ResizeObserver(resize).observe(stage);
 
-  setPlaying(false);
-  refreshAll();
+  applyLanguage();
   resize();
   flyTo(viewDirection('oblique'), fitDistance(), true);
   requestAnimationFrame(frame);
