@@ -33,9 +33,20 @@
      ======================================================= */
   const state = {...PRESETS[0].el};   // a, e, i, O, w, n（角度は deg）
   let activePreset = PRESETS[0].id;
-  let pinnedKey = null;               // クリックで固定した要素
-  let hoveredKey = null;              // マウスが乗っている要素
-  const focusKey = () => hoveredKey || pinnedKey;
+
+  /**
+   * 強調の対象。スライダーの要素か、用語集の用語のどちらか。
+   *   {kind: 'element', key: 'w'}                    … その要素に関係するもの（keys で判定）
+   *   {kind: 'term', id: 6, tags: ['apsides']}       … その用語が指すもの（tags で判定）
+   */
+  let pinned = null;                  // クリックで固定した対象
+  let hovered = null;                 // マウスが乗っている対象
+  const elementFocus = key => ({kind: 'element', key});
+  const termFocus = (id, tags) => ({kind: 'term', id, tags});
+  const currentFocus = () => hovered || pinned;
+  const keyOf = f => (f && f.kind === 'element') ? f.key : null;
+  const focusKey = () => keyOf(currentFocus());   // 強調中の要素キー（用語のときは null）
+  const pinnedKey = () => keyOf(pinned);
 
   /** J2 モード：elapsed は経過時間 [s]、dO は Ω の累積変化 [deg]（360°で折り返さない） */
   const j2 = {on: false, elapsed: 0, dO: 0, start: {...state}, lastGhostAt: 0};
@@ -49,7 +60,7 @@
     state[key] = clamp(value, E.min, E.max);
     if (key === 'n') setPlaying(false);
     activePreset = null;
-    pinnedKey = key;
+    pinned = elementFocus(key);
     resetJ2Timeline();
     refreshAll();
     recordJ2Frame(true);
@@ -59,7 +70,7 @@
   function applyPreset(preset) {
     Object.assign(state, preset.el);
     activePreset = preset.id;
-    pinnedKey = null;
+    pinned = null;
     resetJ2Timeline();
     refreshAll();
     recordJ2Frame(true);
@@ -108,7 +119,7 @@
       <div class="warn" id="warn-${key}" hidden></div>`;
 
     const head = row.querySelector('.el-head');
-    const togglePin = () => { pinnedKey = pinnedKey === key ? null : key; refreshFocus(); };
+    const togglePin = () => { pinned = pinnedKey() === key ? null : elementFocus(key); refreshFocus(); };
     head.addEventListener('click', ev => { if (!ev.target.closest('input')) togglePin(); });
     head.addEventListener('keydown', ev => {
       if ((ev.key === 'Enter' || ev.key === ' ') && !ev.target.closest('input')) { ev.preventDefault(); togglePin(); }
@@ -142,24 +153,25 @@
   function buildGlossary() {
     const wrap = $('#glossary');
     wrap.innerHTML = '';
-    GLOSSARY.forEach(item => {
+    GLOSSARY.forEach((item, id) => {
       const L = loc(item);
       const div = document.createElement('div');
       div.className = 't';
       div.tabIndex = 0;
-      div.dataset.k = item.key;
+      div.dataset.term = id;
       div.style.setProperty('--c', item.color);
       div.innerHTML = `
         <dt><span class="dot"></span>${L.term}<span class="en">${L.alt}</span></dt>
         <dd>${L.body}${item.figure === 'equinox' ? equinoxFigure() : ''}</dd>`;
-      const key = item.key || null;
-      const enter = () => { hoveredKey = key; div.classList.add('on'); refreshFocus(); };
-      const leave = () => { hoveredKey = null; div.classList.remove('on'); refreshFocus(); };
+      const focus = termFocus(id, item.tags);
+      const isPinned = () => pinned && pinned.kind === 'term' && pinned.id === id;
+      const enter = () => { hovered = focus; div.classList.add('on'); refreshFocus(); };
+      const leave = () => { hovered = null; div.classList.remove('on'); refreshFocus(); };
       div.addEventListener('mouseenter', enter);
       div.addEventListener('mouseleave', leave);
       div.addEventListener('focus', enter);
       div.addEventListener('blur', leave);
-      div.addEventListener('click', () => { if (key) { pinnedKey = key; refreshFocus(); } });
+      div.addEventListener('click', () => { pinned = isPinned() ? null : focus; refreshFocus(); });
       wrap.appendChild(div);
     });
   }
@@ -188,8 +200,8 @@
   }
 
   function bindHover(el, key) {
-    el.addEventListener('mouseenter', () => { hoveredKey = key; refreshFocus(); });
-    el.addEventListener('mouseleave', () => { hoveredKey = null; refreshFocus(); });
+    el.addEventListener('mouseenter', () => { hovered = elementFocus(key); refreshFocus(); });
+    el.addEventListener('mouseleave', () => { hovered = null; refreshFocus(); });
   }
 
   function markPresets() {
@@ -246,11 +258,12 @@
    *   dim  = 関係しない要素を強調中のときの透明度倍率
    */
   const tracked = [];
+  const balls = [];                 // 用語の強調時に大きくする点
   const sceneKit = {
     track(mat, base, keys, dim = 0.1) {
       mat.transparent = true;
       mat.opacity = base;
-      const entry = {mat, base, keys, dim};
+      const entry = {mat, base, keys, dim, tags: null};
       tracked.push(entry);
       return entry;
     },
@@ -275,14 +288,15 @@
       const s = new THREE.Mesh(g, m);
       s.frustumCulled = false;
       s.renderOrder = 5;
-      sceneKit.track(m, base, keys, 0.06);
+      s.userData.track = sceneKit.track(m, base, keys, 0.06);
       scene.add(s);
       return s;
     },
     ball(color, base, keys, dim) {
       const m = new THREE.MeshBasicMaterial({color});
       const b = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), m);
-      sceneKit.track(m, base, keys, dim);
+      b.userData.track = sceneKit.track(m, base, keys, dim);
+      balls.push(b);
       scene.add(b);
       return b;
     },
@@ -290,14 +304,14 @@
       const m = new THREE.MeshBasicMaterial({color, depthTest: false});
       const c = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1.3, 14), m);
       c.renderOrder = 11;
-      sceneKit.track(m, 1, keys, 0.08);
+      c.userData.track = sceneKit.track(m, 1, keys, 0.08);
       scene.add(c);
       return c;
     },
     disc(color, base, keys, dim) {
       const m = new THREE.MeshBasicMaterial({color, side: THREE.DoubleSide, depthWrite: false});
       const d = new THREE.Mesh(new THREE.CircleGeometry(1, 128), m);
-      sceneKit.track(m, base, keys, dim);
+      d.userData.track = sceneKit.track(m, base, keys, dim);
       scene.add(d);
       return d;
     },
@@ -401,8 +415,7 @@
     arcN: K.line(ARC_SEG + 1, C.n, 1, ['n'], .12, true), secN: K.sector(C.n, .18, ['n']), coneN: K.cone(C.n, ['n']),
   };
   const velArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xE7ECF4, .3, .15);
-  K.track(velArrow.line.material, .9, ['n'], .2);
-  K.track(velArrow.cone.material, .9, ['n'], .2);
+  const velArrowTracks = [K.track(velArrow.line.material, .9, ['n'], .2), K.track(velArrow.cone.material, .9, ['n'], .2)];
   scene.add(velArrow);
 
   // --- 3D 空間に貼り付く HTML ラベル（textKey は i18n のキー、空なら毎回 innerHTML を書き換える） ---
@@ -412,7 +425,7 @@
     el.className = 'lbl ' + cls;
     if (color) el.style.color = color;
     $('#labels').appendChild(el);
-    labels[id] = {el, textKey, pos: new THREE.Vector3(), keys, focus: 1, hidden: false};
+    labels[id] = {el, textKey, pos: new THREE.Vector3(), keys, tags: null, focus: 1, hidden: false};
   }
   function renderLabelTexts() {
     for (const id in labels) if (labels[id].textKey) labels[id].el.innerHTML = t(labels[id].textKey);
@@ -435,6 +448,41 @@
   addLabel('lenAE', null, 'var(--c-e)', ['e'], 'ang');
   addLabel('eqPl', 'lblEq', null, ['i', 'O'], 'plane');
   addLabel('orPl', 'lblOrb', 'var(--c-i)', ['i', 'O'], 'plane');
+  /**
+   * 用語集から強調するときの対応表（タグ → 3D上のもの）。
+   *   equinox 春分点 / ra 赤経 / nodes 昇交点・降交点 / raan 昇交点赤経 / planes 赤道面・軌道面
+   *   direction 順行・逆行 / apsides 近地点・遠地点 / focus 焦点 / anomaly 近点角 / j2 J2 摂動 / eci 座標系
+   */
+  const tagObjects = (tags, ...objs) => objs.forEach(o => { o.userData.track.tags = tags; });
+  const tagLabels = (tags, ...ids) => ids.forEach(id => { labels[id].tags = tags; });
+  tagObjects(['eci'], obj.pole);
+  tagObjects(['equinox', 'ra', 'eci'], obj.xAxis, obj.xCone);
+  tagObjects(['planes', 'ra', 'eci'], obj.eqDisc, obj.eqRing);
+  tagObjects(['planes'], obj.orbDisc, obj.orbRing);
+  tagObjects(['nodes', 'raan', 'j2'], obj.nodeLine, obj.ascNode, obj.descNode);
+  tagObjects(['direction', 'apsides', 'focus', 'anomaly'], obj.orbit);
+  tagObjects(['apsides'], obj.apsides, obj.semiMaj, obj.apogee);
+  tagObjects(['apsides', 'anomaly'], obj.perigee);
+  tagObjects(['focus'], obj.aeSeg, obj.center);
+  tagObjects(['anomaly', 'direction'], obj.sat, obj.radius);
+  tagObjects(['ra', 'raan'], obj.arcO, obj.secO, obj.coneO);
+  tagObjects(['planes', 'direction'], obj.arcI, obj.secI, obj.refEq, obj.refOrb);
+  tagObjects(['anomaly'], obj.arcN, obj.secN, obj.coneN);
+  velArrowTracks.forEach(tr => { tr.tags = ['direction', 'anomaly']; });
+  tagLabels(['equinox', 'ra', 'eci'], 'x');
+  tagLabels(['eci'], 'z');
+  tagLabels(['ra'], 't90', 't180', 't270');
+  tagLabels(['nodes', 'raan', 'j2'], 'asc', 'desc');
+  tagLabels(['apsides', 'anomaly'], 'peri');
+  tagLabels(['apsides'], 'apo', 'lenA');
+  tagLabels(['anomaly', 'direction'], 'sat');
+  tagLabels(['ra', 'raan'], 'angO');
+  tagLabels(['planes', 'direction'], 'angI');
+  tagLabels(['anomaly'], 'angN');
+  tagLabels(['focus'], 'lenAE');
+  tagLabels(['planes', 'eci'], 'eqPl');
+  tagLabels(['planes'], 'orPl');
+
   labels.t90.el.textContent = '90°';
   labels.t180.el.textContent = '180°';
   labels.t270.el.textContent = '270°';
@@ -488,12 +536,12 @@
     const centerPos = P.clone().multiplyScalar(-e * a / RE);
     frame3d.orbitPts = orbitPts;
     frame3d.ascPos.copy(ascPos);
-    obj.ascNode.position.copy(ascPos);    obj.ascNode.scale.setScalar(ms * .85);
-    obj.descNode.position.copy(descPos);  obj.descNode.scale.setScalar(ms * .7);
-    obj.center.position.copy(centerPos);  obj.center.scale.setScalar(ms * .55);
-    obj.perigee.position.copy(periPos);   obj.perigee.scale.setScalar(ms * .8);
-    obj.apogee.position.copy(apoPos);     obj.apogee.scale.setScalar(ms * .8);
-    obj.sat.position.copy(satPos);        obj.sat.scale.setScalar(ms * 1.25);
+    obj.ascNode.position.copy(ascPos);    setBallSize(obj.ascNode, ms * .85);
+    obj.descNode.position.copy(descPos);  setBallSize(obj.descNode, ms * .7);
+    obj.center.position.copy(centerPos);  setBallSize(obj.center, ms * .55);
+    obj.perigee.position.copy(periPos);   setBallSize(obj.perigee, ms * .8);
+    obj.apogee.position.copy(apoPos);     setBallSize(obj.apogee, ms * .8);
+    obj.sat.position.copy(satPos);        setBallSize(obj.sat, ms * 1.25);
     setPoints(obj.apsides, [periPos, apoPos]);
     setPoints(obj.semiMaj, [centerPos, periPos]);
     setPoints(obj.aeSeg, [centerPos, O0]);
@@ -582,6 +630,7 @@
   let ghostHead = 0, ghostUsed = 0;
 
   const trace = {line: K.line(TRACE_MAX, COLOR.j2, .95, ['O', 'i'], .15), pts: []};
+  trace.line.userData.track.tags = ['j2', 'nodes'];
   trace.line.visible = false;
 
   /** J2 の永年変化率 [deg/day] */
@@ -669,8 +718,7 @@
 
   /** 新しい残像ほど濃く、古いほど薄く。別の要素を強調中はさらに薄くする */
   function updateGhostOpacity() {
-    const key = focusKey();
-    const focus = (!key || key === 'O' || key === 'i') ? 1 : 0.25;
+    const focus = isRelated({keys: ['O', 'i'], tags: ['j2']}, currentFocus()) ? 1 : 0.25;
     for (let age = 0; age < ghostUsed; age++) {
       const idx = (ghostHead - 1 - age + GHOST_COUNT) % GHOST_COUNT;
       ghosts[idx].mat.opacity = (0.32 - 0.26 * age / GHOST_COUNT) * focus;
@@ -782,36 +830,55 @@
 
   function renderExplain() {
     const box = $('#explain');
-    const key = focusKey();
+    const key = focusKey() || pinnedKey();
     if (!key) { box.innerHTML = j2.on ? j2CardHtml() : overviewHtml(); return; }
     const E = ELEMENTS[key], L = loc(E);
     box.innerHTML = `
       <div class="ex-h">
         <span class="s" style="color:var(--c-${key})">${E.sym}</span><b>${L.name}</b><span class="k">${L.what}</span>
-        ${pinnedKey === key ? `<button class="x" type="button" id="unpin">${t('unpin')}</button>` : ''}
+        ${pinnedKey() === key ? `<button class="x" type="button" id="unpin">${t('unpin')}</button>` : ''}
       </div>
       <p class="ex-en">${L.alt}</p>
       <p>${L.desc}</p>
       <p class="now">${interpretValue(key)}</p>`;
     const unpin = $('#unpin');
-    if (unpin) unpin.addEventListener('click', () => { pinnedKey = null; refreshFocus(); });
+    if (unpin) unpin.addEventListener('click', () => { pinned = null; refreshFocus(); });
   }
 
   /* =======================================================
      7. 強調表示
      ======================================================= */
-  const isRelated = (keys, key) => !key || !keys || keys.includes(key);
+  const TERM_BALL_SCALE = 1.8;     // 用語で強調した点の拡大率
+
+  /** entry（keys と tags を持つ）が強調対象 f に関係するか */
+  function isRelated(entry, f) {
+    if (!f) return true;
+    if (f.kind === 'element') return !entry.keys || entry.keys.includes(f.key);
+    return !!entry.tags && entry.tags.some(tg => f.tags.includes(tg));
+  }
+
+  /** 点の大きさを設定する（用語で強調中なら拡大） */
+  function setBallSize(ball, size) {
+    ball.userData.size = size;
+    const f = currentFocus();
+    const boost = (f && f.kind === 'term' && isRelated(ball.userData.track, f)) ? TERM_BALL_SCALE : 1;
+    ball.scale.setScalar(size * boost);
+  }
 
   function refreshFocus() {
-    const key = focusKey();
-    tracked.forEach(tr => { tr.mat.opacity = isRelated(tr.keys, key) ? tr.base : tr.base * tr.dim; });
-    for (const id in labels) labels[id].focus = isRelated(labels[id].keys, key) ? 1 : 0.1;
+    const f = currentFocus(), key = focusKey(), pinKey = pinnedKey();
+    tracked.forEach(tr => { tr.mat.opacity = isRelated(tr, f) ? tr.base : tr.base * tr.dim; });
+    for (const id in labels) labels[id].focus = isRelated(labels[id], f) ? 1 : 0.1;
+    balls.forEach(b => setBallSize(b, b.userData.size || 1));
     document.querySelectorAll('.el').forEach(row => {
       const k = row.dataset.k;
       row.classList.toggle('on', k === key);
-      row.classList.toggle('pin', k === pinnedKey);
+      row.classList.toggle('pin', k === pinKey);
       row.classList.toggle('dim', !!key && k !== key);
-      row.querySelector('.el-head').setAttribute('aria-pressed', String(k === pinnedKey));
+      row.querySelector('.el-head').setAttribute('aria-pressed', String(k === pinKey));
+    });
+    document.querySelectorAll('#glossary .t').forEach(item => {
+      item.classList.toggle('pin', !!pinned && pinned.kind === 'term' && pinned.id === Number(item.dataset.term));
     });
     updateGhostOpacity();
     renderExplain();
@@ -977,7 +1044,7 @@
   $('#j2-on').addEventListener('change', ev => setJ2(ev.target.checked));
   $('#j2-reset').addEventListener('click', restoreJ2Start);
   document.addEventListener('keydown', ev => {
-    if (ev.key === 'Escape' && pinnedKey) { pinnedKey = null; refreshFocus(); }
+    if (ev.key === 'Escape' && pinned) { pinned = null; refreshFocus(); }
   });
   new ResizeObserver(resize).observe(stage);
 
